@@ -3064,6 +3064,12 @@ impl Entity {
             return true;
         }
 
+        if damage_type.has_tag(&tag::DamageType::MINECRAFT_IS_FIRE)
+            && (self.entity_type.fire_immune || self.fire_immune.load(Ordering::Relaxed))
+        {
+            return true;
+        }
+
         // Specific type immunities
         self.damage_immunities
             .lock()

@@ -28,6 +28,9 @@ pub mod wither_skull;
 
 use pumpkin_data::item_stack::ItemStack;
 
+const HURTING_PROJECTILE_AIR_INERTIA: f64 = 0.95f32 as f64;
+const HURTING_PROJECTILE_WATER_INERTIA: f64 = 0.8f32 as f64;
+
 #[must_use]
 pub fn is_projectile(entity_type: &EntityType) -> bool {
     *entity_type == EntityType::ARROW
@@ -137,20 +140,55 @@ impl ThrownItemEntity {
     /// Process a tick for projectile movement and collisions
     pub fn process_tick(&self, caller: &dyn EntityBase) {
         let entity = self.get_entity();
-        let world = entity.world.load();
-
-        entity.update_last_pos();
-
-        // Apply gravity and inertia
         let mut velocity = entity.velocity.load();
         velocity.y -= self.get_gravity();
-
         let inertia = if entity.touching_water.load(Ordering::Relaxed) {
             0.8
         } else {
             0.99
         };
-        velocity = velocity.multiply(inertia, inertia, inertia);
+        self.process_tick_with_velocity(
+            caller,
+            velocity.multiply(inertia, inertia, inertia),
+            true,
+            false,
+        );
+    }
+
+    /// Vanilla `AbstractHurtingProjectile.applyInertia` for small fireballs.
+    pub fn process_fireball_tick(&self, caller: &dyn EntityBase, acceleration_power: f64) {
+        let entity = self.get_entity();
+        let velocity = entity.velocity.load();
+        let inertia = if entity.touching_water.load(Ordering::Relaxed) {
+            HURTING_PROJECTILE_WATER_INERTIA
+        } else {
+            HURTING_PROJECTILE_AIR_INERTIA
+        };
+        let acceleration = velocity.normalize().multiply(
+            acceleration_power,
+            acceleration_power,
+            acceleration_power,
+        );
+        self.process_tick_with_velocity(
+            caller,
+            velocity
+                .add(&acceleration)
+                .multiply(inertia, inertia, inertia),
+            false,
+            true,
+        );
+    }
+
+    fn process_tick_with_velocity(
+        &self,
+        caller: &dyn EntityBase,
+        velocity: Vector3<f64>,
+        sync_velocity_each_tick: bool,
+        include_players: bool,
+    ) {
+        let entity = self.get_entity();
+        let world = entity.world.load();
+        entity.update_last_pos();
 
         // Store velocity
         entity.velocity.store(velocity);
@@ -162,10 +200,11 @@ impl ThrownItemEntity {
         let new_pos = start_pos.add(&delta);
         entity.set_pos(new_pos);
 
-        // Send updated velocity to clients
-        let packet = CEntityVelocity::new(entity.entity_id.into(), velocity);
-        let chunk_pos = entity.chunk_pos.load();
-        world.broadcast_to_chunk(chunk_pos, &packet);
+        if sync_velocity_each_tick {
+            let packet = CEntityVelocity::new(entity.entity_id.into(), velocity);
+            let chunk_pos = entity.chunk_pos.load();
+            world.broadcast_to_chunk(chunk_pos, &packet);
+        }
 
         // Calculate search box for collisions
         let search_box = BoundingBox::new(
@@ -211,7 +250,11 @@ impl ThrownItemEntity {
         }
 
         // Entity collisions
-        let candidates = world.get_entities_at_box(&search_box);
+        let candidates = if include_players {
+            world.get_all_at_box(&search_box)
+        } else {
+            world.get_entities_at_box(&search_box)
+        };
         for cand in candidates {
             if self.should_skip_collision(entity, &cand) {
                 continue;
